@@ -130,10 +130,79 @@ def register_blocked_gemm_cpu(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return c
 
 
+@njit(cache=True)
+def register_blocked_unrolled_cpu(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    m, k = a.shape
+    _, n = b.shape
+    c = np.zeros((m, n), dtype=np.float32)
+
+    for row in range(0, m, RB_THREAD_TILE_M):
+        for col in range(0, n, RB_THREAD_TILE_N):
+            acc00 = 0.0
+            acc01 = 0.0
+            acc10 = 0.0
+            acc11 = 0.0
+
+            row0_valid = row < m
+            row1_valid = row + 1 < m
+            col0_valid = col < n
+            col1_valid = col + 1 < n
+
+            kk = 0
+            limit = k - (k % 4)
+            while kk < limit:
+                a00 = a[row, kk] if row0_valid else 0.0
+                a01 = a[row, kk + 1] if row0_valid else 0.0
+                a02 = a[row, kk + 2] if row0_valid else 0.0
+                a03 = a[row, kk + 3] if row0_valid else 0.0
+                a10 = a[row + 1, kk] if row1_valid else 0.0
+                a11 = a[row + 1, kk + 1] if row1_valid else 0.0
+                a12 = a[row + 1, kk + 2] if row1_valid else 0.0
+                a13 = a[row + 1, kk + 3] if row1_valid else 0.0
+
+                b00 = b[kk, col] if col0_valid else 0.0
+                b01 = b[kk, col + 1] if col1_valid else 0.0
+                b10 = b[kk + 1, col] if col0_valid else 0.0
+                b11 = b[kk + 1, col + 1] if col1_valid else 0.0
+                b20 = b[kk + 2, col] if col0_valid else 0.0
+                b21 = b[kk + 2, col + 1] if col1_valid else 0.0
+                b30 = b[kk + 3, col] if col0_valid else 0.0
+                b31 = b[kk + 3, col + 1] if col1_valid else 0.0
+
+                acc00 += a00 * b00 + a01 * b10 + a02 * b20 + a03 * b30
+                acc01 += a00 * b01 + a01 * b11 + a02 * b21 + a03 * b31
+                acc10 += a10 * b00 + a11 * b10 + a12 * b20 + a13 * b30
+                acc11 += a10 * b01 + a11 * b11 + a12 * b21 + a13 * b31
+                kk += 4
+
+            while kk < k:
+                a0 = a[row, kk] if row0_valid else 0.0
+                a1 = a[row + 1, kk] if row1_valid else 0.0
+                b0 = b[kk, col] if col0_valid else 0.0
+                b1 = b[kk, col + 1] if col1_valid else 0.0
+                acc00 += a0 * b0
+                acc01 += a0 * b1
+                acc10 += a1 * b0
+                acc11 += a1 * b1
+                kk += 1
+
+            if row0_valid and col0_valid:
+                c[row, col] = acc00
+            if row0_valid and col1_valid:
+                c[row, col + 1] = acc01
+            if row1_valid and col0_valid:
+                c[row + 1, col] = acc10
+            if row1_valid and col1_valid:
+                c[row + 1, col + 1] = acc11
+
+    return c
+
+
 CPU_KERNELS = (
     ("naive", naive_gemm_cpu),
     ("tiled", tiled_gemm_cpu),
     ("register_blocked", register_blocked_gemm_cpu),
+    ("register_blocked_unrolled", register_blocked_unrolled_cpu),
 )
 
 
