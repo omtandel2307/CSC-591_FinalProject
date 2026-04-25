@@ -36,9 +36,9 @@ __global__ void naive_gemm_kernel(const float *a, const float *b, float *c,
 
 __global__ void tiled_gemm_kernel(const float *a, const float *b, float *c,
                                   int m, int n, int k) {
-    // Shared memory for current tiles
-    __shared__ float shared_a[TILE_SIZE][TILE_SIZE];
-    __shared__ float shared_b[TILE_SIZE][TILE_SIZE];
+    // +1 padding on the column dimension eliminates shared memory bank conflicts
+    __shared__ float shared_a[TILE_SIZE][TILE_SIZE + 1];
+    __shared__ float shared_b[TILE_SIZE][TILE_SIZE + 1];
 
     // Thread indices within block
     int tx = threadIdx.x;
@@ -105,9 +105,9 @@ __global__ void tiled_gemm_kernel(const float *a, const float *b, float *c,
 
 __global__ void register_blocked_gemm_kernel(const float *a, const float *b, float *c,
                                              int m, int n, int k) {
-    // Shared memory tiles
-    __shared__ float shared_a[RB_BLOCK_TILE_M][RB_TILE_K];
-    __shared__ float shared_b[RB_TILE_K][RB_BLOCK_TILE_N];
+    // +1 padding on the column dimension eliminates shared memory bank conflicts
+    __shared__ float shared_a[RB_BLOCK_TILE_M][RB_TILE_K + 1];
+    __shared__ float shared_b[RB_TILE_K][RB_BLOCK_TILE_N + 1];
 
     // Thread indices
     int tx = threadIdx.x;
