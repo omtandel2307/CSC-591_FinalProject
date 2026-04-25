@@ -202,3 +202,105 @@ __global__ void register_blocked_gemm_kernel(const float *a, const float *b, flo
         c[row1 * n + col1] = acc11;
     }
 }
+
+
+// ============================================================================
+// KERNEL 4: HIGH-PERFORMANCE GEMM
+// ============================================================================
+// Each block covers a 128x128 output tile.
+// Each thread accumulates an 8x8 register tile, giving 16x higher arithmetic
+// intensity than kernel 3 (2x2 tiles).  fmaf maps directly to the GPU's FMA
+// unit.  __launch_bounds__ tells the register allocator to stay within limits
+// that allow 2 blocks per SM.
+
+__global__
+__launch_bounds__(HPC_THREADS_X * HPC_THREADS_Y, 2)
+void hpc_gemm_kernel(const float *a, const float *b, float *c, int m, int n, int k) {
+    // Shared memory with +1 column padding to eliminate bank conflicts on loads
+    __shared__ float shared_a[HPC_BLOCK_M][HPC_TILE_K + 1];
+    __shared__ float shared_b[HPC_TILE_K][HPC_BLOCK_N + 1];
+
+    const int tx  = threadIdx.x;                     // 0..15
+    const int ty  = threadIdx.y;                     // 0..15
+    const int tid = ty * HPC_THREADS_X + tx;         // 0..255
+
+    const int block_row = blockIdx.y * HPC_BLOCK_M;
+    const int block_col = blockIdx.x * HPC_BLOCK_N;
+
+    // 8x8 accumulators live entirely in registers for the full k loop
+    float acc[HPC_THREAD_M][HPC_THREAD_N] = {};
+
+    const int num_tiles = (k + HPC_TILE_K - 1) / HPC_TILE_K;
+
+    for (int tile = 0; tile < num_tiles; ++tile) {
+        const int k_base = tile * HPC_TILE_K;
+
+        // ── Load A tile: 128 rows × 16 cols = 2048 elements, 8 per thread ──
+        // Mapping: lc = tid % HPC_TILE_K  →  consecutive threads hit consecutive
+        // k-columns of the same row → coalesced global reads.
+        #pragma unroll
+        for (int i = 0; i < (HPC_BLOCK_M * HPC_TILE_K) / (HPC_THREADS_X * HPC_THREADS_Y); ++i) {
+            const int flat = i * (HPC_THREADS_X * HPC_THREADS_Y) + tid;
+            const int lr   = flat / HPC_TILE_K;
+            const int lc   = flat % HPC_TILE_K;
+            const int gr   = block_row + lr;
+            const int gc   = k_base   + lc;
+            shared_a[lr][lc] = (gr < m && gc < k) ? a[gr * k + gc] : 0.0f;
+        }
+
+        // ── Load B tile: 16 rows × 128 cols = 2048 elements, 8 per thread ──
+        // Mapping: lc = tid % HPC_BLOCK_N  →  consecutive threads hit consecutive
+        // n-columns of the same row → coalesced global reads.
+        #pragma unroll
+        for (int i = 0; i < (HPC_TILE_K * HPC_BLOCK_N) / (HPC_THREADS_X * HPC_THREADS_Y); ++i) {
+            const int flat = i * (HPC_THREADS_X * HPC_THREADS_Y) + tid;
+            const int lr   = flat / HPC_BLOCK_N;
+            const int lc   = flat % HPC_BLOCK_N;
+            const int gr   = k_base    + lr;
+            const int gc   = block_col + lc;
+            shared_b[lr][lc] = (gr < k && gc < n) ? b[gr * n + gc] : 0.0f;
+        }
+
+        __syncthreads();
+
+        // ── Compute 8x8 outer products across the k tile ──
+        // a_reg and b_reg are kept in registers; the compiler sees a fully
+        // unrolled 8x8x16 = 1024 FMA body with no shared-memory traffic.
+        #pragma unroll
+        for (int kk = 0; kk < HPC_TILE_K; ++kk) {
+            float a_reg[HPC_THREAD_M];
+            float b_reg[HPC_THREAD_N];
+
+            #pragma unroll
+            for (int i = 0; i < HPC_THREAD_M; ++i)
+                a_reg[i] = shared_a[ty * HPC_THREAD_M + i][kk];
+
+            #pragma unroll
+            for (int j = 0; j < HPC_THREAD_N; ++j)
+                b_reg[j] = shared_b[kk][tx * HPC_THREAD_N + j];
+
+            #pragma unroll
+            for (int i = 0; i < HPC_THREAD_M; ++i)
+                #pragma unroll
+                for (int j = 0; j < HPC_THREAD_N; ++j)
+                    acc[i][j] = fmaf(a_reg[i], b_reg[j], acc[i][j]);
+        }
+
+        __syncthreads();
+    }
+
+    // ── Write 8x8 tile to global memory ──
+    const int out_row = block_row + ty * HPC_THREAD_M;
+    const int out_col = block_col + tx * HPC_THREAD_N;
+
+    #pragma unroll
+    for (int i = 0; i < HPC_THREAD_M; ++i) {
+        #pragma unroll
+        for (int j = 0; j < HPC_THREAD_N; ++j) {
+            const int r = out_row + i;
+            const int c2 = out_col + j;
+            if (r < m && c2 < n)
+                c[r * n + c2] = acc[i][j];
+        }
+    }
+}

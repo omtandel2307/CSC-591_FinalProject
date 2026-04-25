@@ -46,4 +46,21 @@ __global__ void tiled_gemm_kernel(const float *a, const float *b, float *c,
 __global__ void register_blocked_gemm_kernel(const float *a, const float *b, float *c,
                                              int m, int n, int k);
 
+// ============================================================================
+// KERNEL 4: HIGH-PERFORMANCE GEMM CONFIGURATION
+// ============================================================================
+// 128x128 output tile per block, 8x8 register tile per thread
+// Arithmetic intensity: 2*8*8 / ((8+8)*4) = 2.0 FLOP/byte  (vs 0.5 for kernel 3)
+
+#define HPC_TILE_K      16
+#define HPC_BLOCK_M     128
+#define HPC_BLOCK_N     128
+#define HPC_THREAD_M    8
+#define HPC_THREAD_N    8
+#define HPC_THREADS_X   (HPC_BLOCK_N / HPC_THREAD_N)   // 16
+#define HPC_THREADS_Y   (HPC_BLOCK_M / HPC_THREAD_M)   // 16
+
+__global__ void hpc_gemm_kernel(const float *a, const float *b, float *c,
+                                int m, int n, int k);
+
 #endif // GEMM_KERNELS_H
