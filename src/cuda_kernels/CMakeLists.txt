@@ -9,6 +9,11 @@ set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 17)
 
+# Ensure extern "C" symbols are visible in the shared library
+set(CMAKE_CXX_VISIBILITY_PRESET default)
+set(CMAKE_CUDA_VISIBILITY_PRESET default)
+set(CMAKE_VISIBILITY_INLINES_HIDDEN OFF)
+
 # Create the kernel library
 add_library(gemm_kernels SHARED
     kernels.cu
