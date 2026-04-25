@@ -2,10 +2,7 @@
 #include "kernels_utils.h"
 #include <string.h>
 
-/**
- * Internal helper: allocate GPU memory, copy host to device, launch kernel, copy back
- */
-static int gemm_helper(const float *h_a, const float *h_b, float *h_c, 
+static int gemm_helper(const float *h_a, const float *h_b, float *h_c,
                        int m, int n, int k,
                        void (*kernel_launcher)(const float*, const float*, float*, int, int, int)) {
     try {
@@ -38,23 +35,18 @@ static int gemm_helper(const float *h_a, const float *h_b, float *h_c,
     }
 }
 
-/**
- * Wrapper: Naive GEMM
- */
+extern "C" {
+
 int naive_gemm(const float *h_a, const float *h_b, float *h_c, int m, int n, int k) {
     return gemm_helper(h_a, h_b, h_c, m, n, k, launch_naive_gemm);
 }
 
-/**
- * Wrapper: Tiled GEMM
- */
 int tiled_gemm(const float *h_a, const float *h_b, float *h_c, int m, int n, int k) {
     return gemm_helper(h_a, h_b, h_c, m, n, k, launch_tiled_gemm);
 }
 
-/**
- * Wrapper: Register-blocked GEMM
- */
 int register_blocked_gemm(const float *h_a, const float *h_b, float *h_c, int m, int n, int k) {
     return gemm_helper(h_a, h_b, h_c, m, n, k, launch_register_blocked_gemm);
+}
+
 }
