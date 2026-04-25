@@ -12,6 +12,7 @@ set(CMAKE_CXX_STANDARD 17)
 # Create the kernel library
 add_library(gemm_kernels SHARED
     kernels.cu
+    gemm_c_interface.cu
 )
 
 # Set include directories
@@ -28,6 +29,7 @@ set_target_properties(gemm_kernels PROPERTIES
 # Optional: Create a static library variant
 add_library(gemm_kernels_static STATIC
     kernels.cu
+    gemm_c_interface.cu
 )
 
 target_include_directories(gemm_kernels_static PUBLIC
