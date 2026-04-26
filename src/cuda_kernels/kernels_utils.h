@@ -77,6 +77,18 @@ inline void launch_hpc_gemm(const float *d_a, const float *d_b, float *d_c,
 }
 
 /**
+ * Launch ultra high-performance GEMM kernel (128x128 block tile, 8x8 thread tile, K-tile=32)
+ */
+inline void launch_ultra_gemm(const float *d_a, const float *d_b, float *d_c,
+                               int m, int n, int k) {
+    dim3 block(ULTRA_THREADS_X, ULTRA_THREADS_Y);
+    dim3 grid((n + ULTRA_BLOCK_N - 1) / ULTRA_BLOCK_N,
+              (m + ULTRA_BLOCK_M - 1) / ULTRA_BLOCK_M);
+    ultra_gemm_kernel<<<grid, block>>>(d_a, d_b, d_c, m, n, k);
+    CHECK_CUDA(cudaGetLastError());
+}
+
+/**
  * Synchronize device and check for errors
  */
 inline void sync_device() {

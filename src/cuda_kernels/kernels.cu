@@ -304,3 +304,111 @@ void hpc_gemm_kernel(const float *a, const float *b, float *c, int m, int n, int
         }
     }
 }
+
+
+// ============================================================================
+// KERNEL 5: ULTRA HIGH-PERFORMANCE GEMM
+// ============================================================================
+// Extends kernel 4 with a doubled K-tile (32 vs 16).  Each tile pass now
+// performs 8*8*32 = 2048 FMAs instead of 1024, halving the number of
+// __syncthreads() calls and the fraction of time spent on tile bookkeeping.
+//
+// __ldg() reads A and B via the read-only (texture/L1) cache.  For tall-skinny
+// matrices (large m, small n) the same B rows are reused by many thread blocks;
+// the cache captures this reuse and cuts effective global-memory bandwidth.
+//
+// Shared memory per block:
+//   A tile: 128 x 36 floats = 18 432 bytes
+//   B tile:  32 x 132 floats = 16 896 bytes
+//   Total  ~ 34.5 KB  (fits in the 48 KB default carveout on Turing/Ampere)
+//
+// __launch_bounds__(256, 1): one block minimum per SM lets the register
+// allocator use more registers, keeping the 8x8 accumulators in registers.
+
+__global__
+__launch_bounds__(ULTRA_THREADS_X * ULTRA_THREADS_Y, 1)
+void ultra_gemm_kernel(const float *a, const float *b, float *c, int m, int n, int k) {
+    // +4 column padding eliminates bank conflicts on the float4-aligned stores
+    __shared__ float shared_a[ULTRA_BLOCK_M][ULTRA_TILE_K + 4];
+    __shared__ float shared_b[ULTRA_TILE_K][ULTRA_BLOCK_N + 4];
+
+    const int tx  = threadIdx.x;
+    const int ty  = threadIdx.y;
+    const int tid = ty * ULTRA_THREADS_X + tx;
+
+    const int block_row = blockIdx.y * ULTRA_BLOCK_M;
+    const int block_col = blockIdx.x * ULTRA_BLOCK_N;
+
+    float acc[ULTRA_THREAD_M][ULTRA_THREAD_N] = {};
+
+    const int num_tiles = (k + ULTRA_TILE_K - 1) / ULTRA_TILE_K;
+
+    for (int tile = 0; tile < num_tiles; ++tile) {
+        const int k_base = tile * ULTRA_TILE_K;
+
+        // ── Load A tile: 128 rows x 32 cols = 4096 elements, 16 per thread ──
+        // Consecutive threads stride across k-columns of the same row
+        // → coalesced global reads.  __ldg uses the read-only cache.
+        #pragma unroll
+        for (int i = 0; i < (ULTRA_BLOCK_M * ULTRA_TILE_K) / (ULTRA_THREADS_X * ULTRA_THREADS_Y); ++i) {
+            const int flat = i * (ULTRA_THREADS_X * ULTRA_THREADS_Y) + tid;
+            const int lr   = flat / ULTRA_TILE_K;
+            const int lc   = flat % ULTRA_TILE_K;
+            const int gr   = block_row + lr;
+            const int gc   = k_base   + lc;
+            shared_a[lr][lc] = (gr < m && gc < k) ? __ldg(&a[gr * k + gc]) : 0.0f;
+        }
+
+        // ── Load B tile: 32 rows x 128 cols = 4096 elements, 16 per thread ──
+        #pragma unroll
+        for (int i = 0; i < (ULTRA_TILE_K * ULTRA_BLOCK_N) / (ULTRA_THREADS_X * ULTRA_THREADS_Y); ++i) {
+            const int flat = i * (ULTRA_THREADS_X * ULTRA_THREADS_Y) + tid;
+            const int lr   = flat / ULTRA_BLOCK_N;
+            const int lc   = flat % ULTRA_BLOCK_N;
+            const int gr   = k_base    + lr;
+            const int gc   = block_col + lc;
+            shared_b[lr][lc] = (gr < k && gc < n) ? __ldg(&b[gr * n + gc]) : 0.0f;
+        }
+
+        __syncthreads();
+
+        // ── Compute 8x8 outer products across the K=32 tile ──
+        // 2048 FMAs per tile with no shared-memory traffic inside the loop.
+        #pragma unroll
+        for (int kk = 0; kk < ULTRA_TILE_K; ++kk) {
+            float a_reg[ULTRA_THREAD_M];
+            float b_reg[ULTRA_THREAD_N];
+
+            #pragma unroll
+            for (int i = 0; i < ULTRA_THREAD_M; ++i)
+                a_reg[i] = shared_a[ty * ULTRA_THREAD_M + i][kk];
+
+            #pragma unroll
+            for (int j = 0; j < ULTRA_THREAD_N; ++j)
+                b_reg[j] = shared_b[kk][tx * ULTRA_THREAD_N + j];
+
+            #pragma unroll
+            for (int i = 0; i < ULTRA_THREAD_M; ++i)
+                #pragma unroll
+                for (int j = 0; j < ULTRA_THREAD_N; ++j)
+                    acc[i][j] = fmaf(a_reg[i], b_reg[j], acc[i][j]);
+        }
+
+        __syncthreads();
+    }
+
+    // ── Write 8x8 tile to global memory ──
+    const int out_row = block_row + ty * ULTRA_THREAD_M;
+    const int out_col = block_col + tx * ULTRA_THREAD_N;
+
+    #pragma unroll
+    for (int i = 0; i < ULTRA_THREAD_M; ++i) {
+        #pragma unroll
+        for (int j = 0; j < ULTRA_THREAD_N; ++j) {
+            const int r  = out_row + i;
+            const int c2 = out_col + j;
+            if (r < m && c2 < n)
+                c[r * n + c2] = acc[i][j];
+        }
+    }
+}

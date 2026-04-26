@@ -59,6 +59,12 @@ int register_blocked_gemm(const float *h_a, const float *h_b, float *h_c, int m,
  */
 int hpc_gemm(const float *h_a, const float *h_b, float *h_c, int m, int n, int k);
 
+/**
+ * Compute C = A * B using ultra high-performance GEMM kernel
+ * (128x128 block tile, 8x8 register tile per thread, K-tile=32, __ldg reads)
+ */
+int ultra_gemm(const float *h_a, const float *h_b, float *h_c, int m, int n, int k);
+
 #ifdef __cplusplus
 }
 #endif

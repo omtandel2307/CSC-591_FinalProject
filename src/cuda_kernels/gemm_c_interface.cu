@@ -53,4 +53,8 @@ int hpc_gemm(const float *h_a, const float *h_b, float *h_c, int m, int n, int k
     return gemm_helper(h_a, h_b, h_c, m, n, k, launch_hpc_gemm);
 }
 
+int ultra_gemm(const float *h_a, const float *h_b, float *h_c, int m, int n, int k) {
+    return gemm_helper(h_a, h_b, h_c, m, n, k, launch_ultra_gemm);
+}
+
 }

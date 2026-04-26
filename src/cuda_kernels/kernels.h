@@ -63,4 +63,25 @@ __global__ void register_blocked_gemm_kernel(const float *a, const float *b, flo
 __global__ void hpc_gemm_kernel(const float *a, const float *b, float *c,
                                 int m, int n, int k);
 
+// ============================================================================
+// KERNEL 5: ULTRA HIGH-PERFORMANCE GEMM CONFIGURATION
+// ============================================================================
+// Same 128x128 block tile and 8x8 register tile as kernel 4, but TILE_K = 32
+// (double kernel 4's 16).  Doubling the K-tile cuts the number of __syncthreads
+// calls in half and doubles the FMA-to-overhead ratio per tile pass.
+// __ldg() routes all A/B global reads through the read-only (texture) cache,
+// improving hit rate for non-square matrix shapes where the same row/column is
+// reused across blocks.
+
+#define ULTRA_TILE_K     32
+#define ULTRA_BLOCK_M    128
+#define ULTRA_BLOCK_N    128
+#define ULTRA_THREAD_M   8
+#define ULTRA_THREAD_N   8
+#define ULTRA_THREADS_X  (ULTRA_BLOCK_N / ULTRA_THREAD_N)   // 16
+#define ULTRA_THREADS_Y  (ULTRA_BLOCK_M / ULTRA_THREAD_M)   // 16
+
+__global__ void ultra_gemm_kernel(const float *a, const float *b, float *c,
+                                  int m, int n, int k);
+
 #endif // GEMM_KERNELS_H
