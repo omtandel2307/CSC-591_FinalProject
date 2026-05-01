@@ -412,3 +412,138 @@ void ultra_gemm_kernel(const float *a, const float *b, float *c, int m, int n, i
         }
     }
 }
+
+
+// ============================================================================
+// KERNEL 6: TURBO GEMM
+// ============================================================================
+// Fixes the two bank-conflict sources in ultra_gemm and adds register
+// prefetching to overlap smem reads with FMA execution.
+//
+// Bank conflict analysis for B in ultra_gemm:
+//   shared_b[kk][tx*8+j], BN+4=132 columns.
+//   bank = (kk*132 + tx*8 + j) % 32.  kk*132%32 = kk*4.
+//   For 16 tx values (stride 8): tx=0,1,...,15 hit banks
+//   {kk*4+0, kk*4+8, kk*4+16, kk*4+24, kk*4+0, ...} → 4-way conflict.
+//
+// Fix: store B as shared_b[kr][j*TX+tx] where TX=16, TN=8.
+//   shared_b[kr][j*TX+tx] = B[k_base+kr][block_col + tx*TN + j]
+//   Read: b_reg[j] = shared_b[kk][j*TX+tx]  (consecutive tx → consecutive banks, no conflict)
+//   Load: b_col = (lc % TX) * TN + (lc / TX)  (non-consecutive global reads, but
+//         smem reads happen TILE_K=32 times per tile vs global load once → tradeoff favors smem)
+//
+// Bank conflict analysis for A in ultra_gemm:
+//   shared_a[128][TILE_K+4=36], stride 36.  8*36%32 = 288%32 = 0 → rows 0 and 8 share banks.
+//   Fix: padding +1 gives stride 33.  8*33%32 = 264%32 = 8 ≠ 0 → all rows access distinct banks.
+//
+// Register prefetch: load kk+1 slice while computing kk, hiding smem latency.
+
+__global__
+__launch_bounds__(TURBO_THREADS_X * TURBO_THREADS_Y, 1)
+void turbo_gemm_kernel(const float *a, const float *b, float *c, int m, int n, int k) {
+    // +1 padding: stride 33, eliminates 2-way bank conflicts (8*33%32=8)
+    __shared__ float shared_a[TURBO_BLOCK_M][TURBO_TILE_K + 1];
+    // Interleaved B layout: shared_b[kr][j*TX+tx] = B[kr][tx*TN+j]
+    __shared__ float shared_b[TURBO_TILE_K][TURBO_BLOCK_N];
+
+    const int tx  = threadIdx.x;   // 0..15
+    const int ty  = threadIdx.y;   // 0..15
+    const int tid = ty * TURBO_THREADS_X + tx;
+
+    const int block_row = blockIdx.y * TURBO_BLOCK_M;
+    const int block_col = blockIdx.x * TURBO_BLOCK_N;
+
+    float acc[TURBO_THREAD_M][TURBO_THREAD_N] = {};
+
+    const int NTHREADS   = TURBO_THREADS_X * TURBO_THREADS_Y;  // 256
+    const int num_tiles  = (k + TURBO_TILE_K - 1) / TURBO_TILE_K;
+
+    for (int tile = 0; tile < num_tiles; ++tile) {
+        const int k_base = tile * TURBO_TILE_K;
+
+        // ── Load A tile: 128×32 = 4096 elements, 16 per thread, coalesced ──
+        #pragma unroll
+        for (int i = 0; i < (TURBO_BLOCK_M * TURBO_TILE_K) / NTHREADS; ++i) {
+            const int flat = i * NTHREADS + tid;
+            const int lr   = flat / TURBO_TILE_K;
+            const int lc   = flat % TURBO_TILE_K;
+            const int gr   = block_row + lr;
+            const int gc   = k_base   + lc;
+            shared_a[lr][lc] = (gr < m && gc < k) ? __ldg(&a[gr * k + gc]) : 0.0f;
+        }
+
+        // ── Load B tile (interleaved): 32×128 = 4096 elements, 16 per thread ──
+        // Interleaved column mapping: smem column lc → B column (lc%TX)*TN + lc/TX
+        // Consecutive lc → consecutive smem banks; global loads stride by TN=8
+        // (acceptable: global loads happen once per tile, smem reads happen TILE_K=32 times)
+        #pragma unroll
+        for (int i = 0; i < (TURBO_TILE_K * TURBO_BLOCK_N) / NTHREADS; ++i) {
+            const int flat  = i * NTHREADS + tid;
+            const int lr    = flat / TURBO_BLOCK_N;
+            const int lc    = flat % TURBO_BLOCK_N;
+            const int b_col = (lc % TURBO_THREADS_X) * TURBO_THREAD_N + (lc / TURBO_THREADS_X);
+            const int gr    = k_base    + lr;
+            const int gc    = block_col + b_col;
+            shared_b[lr][lc] = (gr < k && gc < n) ? __ldg(&b[gr * n + gc]) : 0.0f;
+        }
+
+        __syncthreads();
+
+        // ── Prefetch kk=0 slice into registers ──
+        float a_cur[TURBO_THREAD_M], b_cur[TURBO_THREAD_N];
+        #pragma unroll
+        for (int i = 0; i < TURBO_THREAD_M; ++i)
+            a_cur[i] = shared_a[ty * TURBO_THREAD_M + i][0];
+        #pragma unroll
+        for (int j = 0; j < TURBO_THREAD_N; ++j)
+            b_cur[j] = shared_b[0][j * TURBO_THREADS_X + tx];
+
+        // ── Compute 8x8 outer products with register prefetch ──
+        // Prefetch kk+1 while computing kk to hide smem read latency
+        #pragma unroll
+        for (int kk = 0; kk < TURBO_TILE_K - 1; ++kk) {
+            float a_next[TURBO_THREAD_M], b_next[TURBO_THREAD_N];
+
+            #pragma unroll
+            for (int i = 0; i < TURBO_THREAD_M; ++i)
+                a_next[i] = shared_a[ty * TURBO_THREAD_M + i][kk + 1];
+            #pragma unroll
+            for (int j = 0; j < TURBO_THREAD_N; ++j)
+                b_next[j] = shared_b[kk + 1][j * TURBO_THREADS_X + tx];
+
+            #pragma unroll
+            for (int i = 0; i < TURBO_THREAD_M; ++i)
+                #pragma unroll
+                for (int j = 0; j < TURBO_THREAD_N; ++j)
+                    acc[i][j] = fmaf(a_cur[i], b_cur[j], acc[i][j]);
+
+            #pragma unroll
+            for (int i = 0; i < TURBO_THREAD_M; ++i) a_cur[i] = a_next[i];
+            #pragma unroll
+            for (int j = 0; j < TURBO_THREAD_N; ++j) b_cur[j] = b_next[j];
+        }
+        // Last kk = TURBO_TILE_K - 1
+        #pragma unroll
+        for (int i = 0; i < TURBO_THREAD_M; ++i)
+            #pragma unroll
+            for (int j = 0; j < TURBO_THREAD_N; ++j)
+                acc[i][j] = fmaf(a_cur[i], b_cur[j], acc[i][j]);
+
+        __syncthreads();
+    }
+
+    // ── Write 8x8 tile to global memory ──
+    const int out_row = block_row + ty * TURBO_THREAD_M;
+    const int out_col = block_col + tx * TURBO_THREAD_N;
+
+    #pragma unroll
+    for (int i = 0; i < TURBO_THREAD_M; ++i) {
+        #pragma unroll
+        for (int j = 0; j < TURBO_THREAD_N; ++j) {
+            const int r  = out_row + i;
+            const int c2 = out_col + j;
+            if (r < m && c2 < n)
+                c[r * n + c2] = acc[i][j];
+        }
+    }
+}

@@ -65,6 +65,13 @@ int hpc_gemm(const float *h_a, const float *h_b, float *h_c, int m, int n, int k
  */
 int ultra_gemm(const float *h_a, const float *h_b, float *h_c, int m, int n, int k);
 
+/**
+ * Compute C = A * B using turbo GEMM kernel
+ * (128x128 block tile, 8x8 register tile, K-tile=32, interleaved B smem,
+ *  +1 A smem padding, register prefetch)
+ */
+int turbo_gemm(const float *h_a, const float *h_b, float *h_c, int m, int n, int k);
+
 #ifdef __cplusplus
 }
 #endif

@@ -84,4 +84,28 @@ __global__ void hpc_gemm_kernel(const float *a, const float *b, float *c,
 __global__ void ultra_gemm_kernel(const float *a, const float *b, float *c,
                                   int m, int n, int k);
 
+// ============================================================================
+// KERNEL 6: TURBO GEMM CONFIGURATION
+// ============================================================================
+// Same 128x128 block tile and 8x8 register tile as Kernel 5, but with three
+// targeted optimizations:
+//   1. Interleaved B smem layout: stores B[kr][tx*TN+j] at smem[kr][j*TX+tx]
+//      so consecutive tx indices access consecutive smem banks (stride 1) instead
+//      of stride 8, eliminating the 4-way bank conflicts present in ultra_gemm.
+//   2. A smem padding +1 (stride 33): eliminates the 2-way bank conflicts that
+//      the +4 padding (stride 36 = 32+4, 8*36%32=0) caused for ultra_gemm.
+//   3. Register prefetching: loads smem → registers for kk+1 while computing
+//      kk, hiding shared-memory read latency.
+
+#define TURBO_TILE_K    32
+#define TURBO_BLOCK_M   128
+#define TURBO_BLOCK_N   128
+#define TURBO_THREAD_M  8
+#define TURBO_THREAD_N  8
+#define TURBO_THREADS_X (TURBO_BLOCK_N / TURBO_THREAD_N)   // 16
+#define TURBO_THREADS_Y (TURBO_BLOCK_M / TURBO_THREAD_M)   // 16
+
+__global__ void turbo_gemm_kernel(const float *a, const float *b, float *c,
+                                  int m, int n, int k);
+
 #endif // GEMM_KERNELS_H

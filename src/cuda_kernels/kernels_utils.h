@@ -89,6 +89,18 @@ inline void launch_ultra_gemm(const float *d_a, const float *d_b, float *d_c,
 }
 
 /**
+ * Launch turbo GEMM kernel (128x128 block, 8x8 thread tile, interleaved B smem, reg prefetch)
+ */
+inline void launch_turbo_gemm(const float *d_a, const float *d_b, float *d_c,
+                               int m, int n, int k) {
+    dim3 block(TURBO_THREADS_X, TURBO_THREADS_Y);
+    dim3 grid((n + TURBO_BLOCK_N - 1) / TURBO_BLOCK_N,
+              (m + TURBO_BLOCK_M - 1) / TURBO_BLOCK_M);
+    turbo_gemm_kernel<<<grid, block>>>(d_a, d_b, d_c, m, n, k);
+    CHECK_CUDA(cudaGetLastError());
+}
+
+/**
  * Synchronize device and check for errors
  */
 inline void sync_device() {
