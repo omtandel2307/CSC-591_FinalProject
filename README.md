@@ -1,34 +1,39 @@
-# GEMM Optimization
+# CUDA GEMM Optimization
 
-This project implements the staged GEMM plan from the proposal:
+This repository contains the CUDA C++ implementation and Google Colab workflow for a CSC 591 GEMM optimization study.
+
+The project benchmarks a staged sequence of GEMM kernels:
 
 1. Naive global-memory GEMM
 2. Shared-memory tiled GEMM
 3. Register-blocked GEMM
+4. HPC GEMM with larger block and thread tiles
+5. Ultra GEMM with larger K-tiles and read-only cached loads
+6. Turbo GEMM with shared-memory layout tuning and register prefetching
 
-The kernels are written with Numba CUDA so they can run without a local `nvcc` toolchain when CUDA is available. PyTorch is used as the correctness and performance baseline through `torch.matmul`.
+The kernels are compiled with CMake into a shared library and called from Python in the notebook using `ctypes`. PyTorch `matmul` is used as the correctness and performance reference baseline.
 
-## Layout
+## Files
 
-- `src/gemm_optimization/kernels.py`: CUDA kernels and launch helpers
-- `src/gemm_optimization/benchmark.py`: correctness checks and benchmark harness
+- `CSC591_GEMM_Colab.ipynb`: Colab notebook that clones this repo, builds the CUDA kernels, runs correctness checks, benchmarks performance, plots results, and saves CSV/JSON reports.
+- `src/cuda_kernels/kernels.cu`: CUDA kernel implementations.
+- `src/cuda_kernels/kernels.h`: Kernel declarations and configuration constants.
+- `src/cuda_kernels/kernels_utils.h`: CUDA launch and memory helper utilities.
+- `src/cuda_kernels/gemm_c_interface.cu`: C-style wrapper functions used by Python `ctypes`.
+- `src/cuda_kernels/gemm_c_interface.h`: C interface declarations.
+- `src/cuda_kernels/CMakeLists.txt`: CUDA build configuration.
 
-## Quick start
+## How To Run
 
-```powershell
-python -m gemm_optimization.benchmark --quick
-```
+1. Open `CSC591_GEMM_Colab.ipynb` in Google Colab.
+2. Enable a GPU runtime with `Runtime -> Change runtime type -> GPU`.
+3. Run all cells.
 
-Run a broader comparison:
-
-```powershell
-python -m gemm_optimization.benchmark
-```
-
-On machines where Numba CUDA cannot initialize reliably, the benchmark automatically falls back to CPU implementations of the same staged kernels so the project still runs end to end.
+The notebook installs required Python packages, clones this repository, builds the CUDA shared library, validates the kernels, and benchmarks them against PyTorch.
 
 ## Notes
 
 - Inputs are `float32`.
-- The tiled and register-blocked kernels assume dimensions are not necessarily multiples of the tile size and guard bounds accordingly.
-- A double-buffered kernel is left as a natural next step after validating these three stages.
+- The custom CUDA wrapper timing includes device allocation and host/device transfers.
+- The PyTorch timing is measured after tensors are already placed on the GPU, so the reported percentages are practical end-to-end reference comparisons rather than pure kernel-only efficiency measurements.
+- The CUDA kernels guard boundary conditions for matrix dimensions that are not exact multiples of the tile size.
